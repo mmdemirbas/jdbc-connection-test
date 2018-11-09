@@ -19,6 +19,7 @@ import java.text.MessageFormat;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Spliterators;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.LongStream;
@@ -36,49 +37,28 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 final class LinkFailureTest {
 
+    /*
+       Sample properties file content:
+
+       {
+         "host"     : "...",
+         "username" : "...",
+         "password" : "...",
+         "database" : "...",
+         "port"     : "3306"
+       }
+     */
+    private static final Config CONFIG = parseConfig(Paths.get("db-properties.json"));
+
     @TestFactory
-    Stream<DynamicTest> tryFixedTimes() throws IOException {
-        long repeatCount = 10L;
-
-        /*
-           Sample properties file content:
-
-           {
-             "host"     : "...",
-             "username" : "...",
-             "password" : "...",
-             "database" : "...",
-             "port"     : "3306"
-           }
-         */
-        Path configFile = Paths.get("db-properties.json");
-
-        String text      = new String(Files.readAllBytes(configFile), StandardCharsets.UTF_8);
-        DbDoc  json      = JsonParser.parseDoc(text);
-        String host      = ((JsonString) json.get("host")).getString();
-        String username  = ((JsonString) json.get("username")).getString();
-        String password  = ((JsonString) json.get("password")).getString();
-        String database  = ((JsonString) json.get("database")).getString();
-        String port      = ((JsonString) json.get("port")).getString();
-        String urlFormat = "jdbc:mysql://{0}:{1}/{2}?zeroDateTimeBehavior=convertToNull&tcpKeepAlive=true&useSSL=true&requireSSL=true&trustServerCertificate=true&allowLocalInfile=false&useBatchMultiSend=false&sessionVariables=wait_timeout=3600";
-        String url       = MessageFormat.format(urlFormat, host, port, database);
+    Stream<DynamicTest> tryFixedTimes() {
+        long repeatCount = 1000L;
 
         AtomicInteger failCount = new AtomicInteger();
         return LongStream.range(0L, repeatCount + 1)
                          .mapToObj(index -> {
                              if (index < repeatCount) {
-                                 String displayName = String.format("[%d]", index);
-                                 return DynamicTest.dynamicTest(displayName, () -> {
-                                     try (Connection connection = DriverManager.getConnection(url, username, password);
-                                          Statement statement = connection.createStatement();
-                                          ResultSet resultSet = statement.executeQuery("SELECT 1")) {
-                                         resultSet.next();
-                                         resultSet.getString(1);
-                                     } catch (Throwable e) {
-                                         failCount.incrementAndGet();
-                                         fail(e);
-                                     }
-                                 });
+                                 return CONFIG.newTest(index, failCount::incrementAndGet);
                              }
 
                              return DynamicTest.dynamicTest("summary", () -> {
@@ -95,58 +75,76 @@ final class LinkFailureTest {
     }
 
     @TestFactory
-    Stream<DynamicTest> tryUntilFail() throws IOException {
-        /*
-           Sample properties file content:
-
-           {
-             "host"     : "...",
-             "username" : "...",
-             "password" : "...",
-             "database" : "...",
-             "port"     : "3306"
-           }
-         */
-        Path configFile = Paths.get("db-properties.json");
-
-        String text      = new String(Files.readAllBytes(configFile), StandardCharsets.UTF_8);
-        DbDoc  json      = JsonParser.parseDoc(text);
-        String host      = ((JsonString) json.get("host")).getString();
-        String username  = ((JsonString) json.get("username")).getString();
-        String password  = ((JsonString) json.get("password")).getString();
-        String database  = ((JsonString) json.get("database")).getString();
-        String port      = ((JsonString) json.get("port")).getString();
-        String urlFormat = "jdbc:mysql://{0}:{1}/{2}?zeroDateTimeBehavior=convertToNull&tcpKeepAlive=true&useSSL=true&requireSSL=true&trustServerCertificate=true&allowLocalInfile=false&useBatchMultiSend=false&sessionVariables=wait_timeout=3600";
-        String url       = MessageFormat.format(urlFormat, host, port, database);
-
+    Stream<DynamicTest> tryUntilFail() {
         return StreamSupport.stream(Spliterators.spliteratorUnknownSize(new Iterator<DynamicTest>() {
             private final AtomicBoolean stop = new AtomicBoolean();
             private final AtomicInteger index = new AtomicInteger();
 
             @Override
-            public boolean hasNext() {
-                return !stop.get();
+            public DynamicTest next() {
+                if (hasNext()) {
+                    return CONFIG.newTest(index.getAndIncrement(), () -> stop.set(true));
+                }
+                throw new NoSuchElementException();
             }
 
             @Override
-            public DynamicTest next() {
-                if (!hasNext()) {
-                    throw new NoSuchElementException();
-                }
-
-                String displayName = String.format("[%d]", index.getAndIncrement());
-                return DynamicTest.dynamicTest(displayName, () -> {
-                    try (Connection connection = DriverManager.getConnection(url, username, password);
-                         Statement statement = connection.createStatement();
-                         ResultSet resultSet = statement.executeQuery("SELECT 1")) {
-                        resultSet.next();
-                        resultSet.getString(1);
-                    } catch (Throwable e) {
-                        stop.set(true);
-                        fail(e);
-                    }
-                });
+            public boolean hasNext() {
+                return !stop.get();
             }
         }, ORDERED & DISTINCT & NONNULL), false);
+    }
+
+    private static Config parseConfig(Path configFile) {
+        try {
+            String text      = new String(Files.readAllBytes(configFile), StandardCharsets.UTF_8);
+            DbDoc  json      = JsonParser.parseDoc(text);
+            String host      = ((JsonString) json.get("host")).getString();
+            String username  = ((JsonString) json.get("username")).getString();
+            String password  = ((JsonString) json.get("password")).getString();
+            String database  = ((JsonString) json.get("database")).getString();
+            String port      = ((JsonString) json.get("port")).getString();
+            String urlFormat = "jdbc:mysql://{0}:{1}/{2}?zeroDateTimeBehavior=convertToNull&tcpKeepAlive=true&useSSL=true&requireSSL=true&trustServerCertificate=true&allowLocalInfile=false&useBatchMultiSend=false&sessionVariables=wait_timeout=3600";
+            String url       = MessageFormat.format(urlFormat, host, port, database);
+            return new Config(url, username, password);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static final class Config {
+
+        private final String url;
+        private final String username;
+        private final String password;
+
+        Config(String url, String username, String password) {
+            this.url = url;
+            this.username = username;
+            this.password = password;
+        }
+
+        DynamicTest newTest(long index, Runnable onFailCallback) {
+            String displayName = String.format("[%d]", index);
+            return DynamicTest.dynamicTest(displayName, () -> {
+                long start = System.nanoTime();
+                try (Connection connection = DriverManager.getConnection(url, username, password);
+                     Statement statement = connection.createStatement();
+                     ResultSet resultSet = statement.executeQuery("SELECT 1")) {
+                    resultSet.next();
+                    resultSet.getString(1);
+                    logElapsedTime(start);
+                } catch (Throwable e) {
+                    logElapsedTime(start);
+                    onFailCallback.run();
+                    fail(e);
+                }
+            });
+        }
+
+        private static void logElapsedTime(long start) {
+            System.out.println(MessageFormat.format("Elapsed time {0} nanos",
+                                                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)));
+        }
     }
 }
